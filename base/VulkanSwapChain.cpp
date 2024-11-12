@@ -403,7 +403,7 @@ void VulkanSwapChain::create(uint32_t *width, uint32_t *height, bool vsync, bool
 		colorAttachmentView.viewType = VK_IMAGE_VIEW_TYPE_2D;
 		colorAttachmentView.flags = 0;
 
-		colorAttachmentView.image = buffers[i].image;
+		colorAttachmentView.image = images[i];
 		buffers[i].image = images[i];
 		VK_CHECK_RESULT(vkCreateImageView(device, &colorAttachmentView, nullptr, &buffers[i].view));
 	}
