@@ -77,6 +77,7 @@ public:
 
 	// A node represents an object in the glTF scene graph
 	struct Node {
+		int nodeIndex = -1;
 		Node* parent;
 		std::vector<Node*> children;
 		Mesh mesh;
@@ -89,14 +90,14 @@ public:
 		}
 	};
 
-	enum AnimationTargetPath {
+	enum EAnimationTargetPath {
 		kATPath_Translation,
 		kATPath_Rotation,
 		kATPath_Scale,
 		kATPath_Weight,
 		kATPath_Max
 	};
-	static AnimationTargetPath parseAniTargetPathFromString(const std::string& str) {
+	static EAnimationTargetPath parseAniTargetPathFromString(const std::string& str) {
 		if (str == "translation") return kATPath_Translation;
 		else if (str == "rotation") return kATPath_Rotation;
 		else if (str == "scale") return kATPath_Scale;
@@ -171,35 +172,39 @@ public:
 	struct AnimationSampler
 	{
 		bool isValid() const {
-			return timeRange.second > timeRange.first;
+			return times.size() >= 2;
 		}
-		void invalidate() {
-			timeRange.second = timeRange.first = 0.0f;
+		void clear() {
+			times.clear();
+			translation.clear();
+			scale.clear();
+			rotation.clear();
+			weights.clear();
 		}
 		operator bool() const {
 			return isValid();
 		}
-		std::pair<float, float> timeRange = { 0.0f, 0.0f };
-
-		glm::vec3 translation;
-		glm::vec3 scale;
-		glm::quat rotation;
-		glm::vec4 weights;
-	};
-	struct AnimationChannel
+		std::vector<float> times;
+		std::vector<glm::vec3> translation;
+		std::vector<glm::vec3> scale;
+		std::vector<glm::quat> rotation;
+		std::vector<glm::vec4> weights;
+	}; 
+	struct AnimationTrack
 	{
 		bool isValid() const {
-			return targetNode && samplers.size() > 0;
+			return samplers.size() > 0;
 		}
 		operator bool() const {
 			return isValid();
 		}
 
-		Node* targetNode = nullptr;
 		std::array<AnimationSampler, kATPath_Max> samplers;
 	};
-	struct Animation : public std::vector<AnimationChannel>
-	{};
+	struct Animation : public std::vector<AnimationTrack>
+	{
+		float duration = 0.0f;
+	};
 
 	// A glTF material stores information in e.g. the texture that is attached to it and colors
 	struct Material {
@@ -227,7 +232,7 @@ public:
 	std::vector<Image> images;
 	std::vector<Texture> textures;
 	std::vector<Material> materials;
-	std::vector<Node*> nodes;
+	std::vector<Node*> nodes, nodeByIndex;
 	Animation animation;
 
 	~VulkanglTFModel()
@@ -315,7 +320,7 @@ public:
 		}
 	}
 
-	void loadNode(const tinygltf::Node& inputNode, const tinygltf::Model& input, VulkanglTFModel::Node* parent, std::vector<uint32_t>& indexBuffer, std::vector<VulkanglTFModel::Vertex>& vertexBuffer)
+	void loadNode(const tinygltf::Node& inputNode, int nodeIndex, const tinygltf::Model& input, VulkanglTFModel::Node* parent, std::vector<uint32_t>& indexBuffer, std::vector<VulkanglTFModel::Vertex>& vertexBuffer)
 	{
 		VulkanglTFModel::Node* node = new VulkanglTFModel::Node{};
 		node->bindMatrix = glm::mat4(1.0f);
@@ -336,11 +341,12 @@ public:
 		if (inputNode.matrix.size() == 16) {
 			node->bindMatrix = glm::make_mat4x4(inputNode.matrix.data());
 		};
+		node->curMatrix = node->bindMatrix;
 
 		// Load node's children
 		if (inputNode.children.size() > 0) {
 			for (size_t i = 0; i < inputNode.children.size(); i++) {
-				loadNode(input.nodes[inputNode.children[i]], input , node, indexBuffer, vertexBuffer);
+				loadNode(input.nodes[inputNode.children[i]], inputNode.children[i], input , node, indexBuffer, vertexBuffer);
 			}
 		}
 
@@ -442,55 +448,80 @@ public:
 		else {
 			nodes.push_back(node);
 		}
+
+		node->nodeIndex = nodeIndex;
+		if (nodeIndex >= nodeByIndex.size()) nodeByIndex.resize(nodeIndex + 1);
+		nodeByIndex[nodeIndex] = node;
 	}
 
-	template<class T>
-	static bool readAccesor(const tinygltf::Model& input, const tinygltf::Accessor& accessor, void* data, size_t dataSize)
+	static int getAccesorTypeChannels(int type) {
+		switch (type)
+		{
+		case TINYGLTF_TYPE_VEC2:
+			return 2;
+		case TINYGLTF_TYPE_VEC3:
+			return 3;
+		case TINYGLTF_TYPE_VEC4:
+			return 4;
+		default:
+			return 1;
+			break;
+		}
+	}
+	template<class T, int TComponentCount, class ComponentT>
+	static int readAccesor(const tinygltf::Model& input, const tinygltf::Accessor& accessor, std::vector<ComponentT>& values)
 	{
 		const tinygltf::BufferView& bufferView = input.bufferViews[accessor.bufferView];
 		const tinygltf::Buffer& buffer = input.buffers[bufferView.buffer];
+		if (accessor.count == 0) return false;
 
+		// TINYGLTF_TYPE_VEC2
 		switch (accessor.componentType) {
 		case TINYGLTF_PARAMETER_TYPE_INT:
 		case TINYGLTF_PARAMETER_TYPE_UNSIGNED_INT:{
 			if (!std::is_same<T, int32_t>::value && !std::is_same<T, uint32_t>::value)
 				return false;
-			if (accessor.count * sizeof(T) < dataSize)
+			if (getAccesorTypeChannels(accessor.type) != TComponentCount)
 				return false;
-			memcpy(data, &buffer.data[accessor.byteOffset + bufferView.byteOffset], accessor.count * sizeof(T));
+			values.resize(accessor.count);
+			memcpy(&values[0], &buffer.data[accessor.byteOffset + bufferView.byteOffset], accessor.count * sizeof(ComponentT));
 		}break;
 		case TINYGLTF_PARAMETER_TYPE_SHORT:
 		case TINYGLTF_PARAMETER_TYPE_UNSIGNED_SHORT: {
 			if (!std::is_same<T, int16_t>::value && !std::is_same<T, uint16_t>::value)
 				return false;
-			if (accessor.count * sizeof(T) < dataSize)
+			if (getAccesorTypeChannels(accessor.type) != TComponentCount)
 				return false;
-			memcpy(data, &buffer.data[accessor.byteOffset + bufferView.byteOffset], accessor.count * sizeof(T));
+			values.resize(accessor.count);
+			memcpy(&values[0], &buffer.data[accessor.byteOffset + bufferView.byteOffset], accessor.count * sizeof(ComponentT));
 		}break;
 		case TINYGLTF_PARAMETER_TYPE_BYTE:
 		case TINYGLTF_PARAMETER_TYPE_UNSIGNED_BYTE: {
 			if (!std::is_same<T, int8_t>::value && !std::is_same<T, uint8_t>::value)
 				return false;
-			if (accessor.count * sizeof(T) < dataSize)
+			if (getAccesorTypeChannels(accessor.type) != TComponentCount)
 				return false;
-			memcpy(data, &buffer.data[accessor.byteOffset + bufferView.byteOffset], accessor.count * sizeof(T));
+			values.resize(accessor.count);
+			memcpy(&values[0], &buffer.data[accessor.byteOffset + bufferView.byteOffset], accessor.count * sizeof(ComponentT));
 		}break;
 		case TINYGLTF_PARAMETER_TYPE_FLOAT: {
 			if (!std::is_same<T, float>::value)
 				return false;
-			if (accessor.count * sizeof(T) < dataSize)
+			if (getAccesorTypeChannels(accessor.type) != TComponentCount)
 				return false;
-			memcpy(data, &buffer.data[accessor.byteOffset + bufferView.byteOffset], accessor.count * sizeof(T));
+			values.resize(accessor.count);
+			memcpy(&values[0], &buffer.data[accessor.byteOffset + bufferView.byteOffset], accessor.count * sizeof(ComponentT));
 		}break;
 		default:
 			return false;
 		}
-		return true;
+		return accessor.count;
 	}
 	void loadAnimations(tinygltf::Model& input)
 	{
 		animation.clear();
-		animation.resize(nodes.size());
+		animation.resize(nodeByIndex.size());
+		animation.duration = 0;
 
 		for (auto& iAnimation : input.animations)
 		for (auto& ch : iAnimation.channels) 
@@ -503,41 +534,63 @@ public:
 			const tinygltf::Accessor& inputAccess = input.accessors[iSampler.input];
 			const tinygltf::Accessor& outputAccess = input.accessors[iSampler.output];
 
-			AnimationTargetPath targetPath = parseAniTargetPathFromString(ch.target_path);
+			EAnimationTargetPath targetPath = parseAniTargetPathFromString(ch.target_path);
 			if (targetPath == kATPath_Max) continue;
 
-			if (ch.target_node >= nodes.size()) continue;
-			AnimationChannel& oChannel = animation[ch.target_node];
-			oChannel.targetNode = nodes[ch.target_node];
+			if (ch.target_node >= nodeByIndex.size()) continue;
+			AnimationTrack& oChannel = animation[ch.target_node];
 			
 			AnimationSampler& oSampler = oChannel.samplers[targetPath];
-			bool readSuccess = false;
+			int readCount = 0;
 			switch (targetPath)
 			{
 			case kATPath_Translation:
-				readSuccess = readAccesor<float>(input, outputAccess, &oSampler.translation, sizeof(oSampler.translation));
+				readCount = readAccesor<float, 3>(input, outputAccess, oSampler.translation);
 				break;
 			case kATPath_Rotation:
-				readSuccess = readAccesor<float>(input, outputAccess, &oSampler.rotation, sizeof(oSampler.rotation));
+				readCount = readAccesor<float, 4>(input, outputAccess, oSampler.rotation);
 				break;
 			case kATPath_Scale:
-				readSuccess = readAccesor<float>(input, outputAccess, &oSampler.scale, sizeof(oSampler.scale));
+				readCount = readAccesor<float, 3>(input, outputAccess, oSampler.scale);
 				break;
 			case kATPath_Weight:
-				readSuccess = readAccesor<float>(input, outputAccess, &oSampler.weights, sizeof(oSampler.weights));
+				readCount = readAccesor<float, 4>(input, outputAccess, oSampler.weights);
 				break;
 			case kATPath_Max:
 			default:
 				break;
 			}
-			if (!readSuccess) {
-				oSampler.invalidate();
+			if (!readCount) {
+				oSampler.clear();
 				continue;
 			}
 			
-			readSuccess = readAccesor<float>(input, inputAccess, &oSampler.timeRange, sizeof(oSampler.timeRange));
-			if (!readSuccess) {
-				oSampler.invalidate();
+			int readCount1 = readAccesor<float, 1>(input, inputAccess, oSampler.times);
+			if (!readCount1) {
+				oSampler.clear();
+			}
+			animation.duration = std::max(animation.duration, oSampler.times.back());
+
+			if (readCount != readCount1) {
+				int minCount = std::min(readCount, readCount1);
+				switch (targetPath)
+				{
+				case kATPath_Translation:
+					oSampler.translation.resize(minCount);
+					break;
+				case kATPath_Rotation:
+					oSampler.rotation.resize(minCount);
+					break;
+				case kATPath_Scale:
+					oSampler.scale.resize(minCount);
+					break;
+				case kATPath_Weight:
+					oSampler.weights.resize(minCount);
+					break;
+				case kATPath_Max:
+				default:
+					break;
+				}
 			}
 		}
 	}
@@ -552,10 +605,10 @@ public:
 		if (node->mesh.primitives.size() > 0) {
 			// Pass the node's matrix via push constants
 			// Traverse the node hierarchy to the top-most parent to get the final matrix of the current node
-			glm::mat4 nodeMatrix = node->bindMatrix;
+			glm::mat4 nodeMatrix = node->curMatrix;
 			VulkanglTFModel::Node* currentParent = node->parent;
 			while (currentParent) {
-				nodeMatrix = currentParent->bindMatrix * nodeMatrix;
+				nodeMatrix = currentParent->curMatrix * nodeMatrix;
 				currentParent = currentParent->parent;
 			}
 			// Pass the final matrix to the vertex shader using push constants
@@ -588,9 +641,77 @@ public:
 		}
 	}
 
+	static float clamp(float minv, float maxv, float v) {
+		return std::max(minv, std::min(minv, v));
+	}
+#define Eplison 1e-5
+	static bool selectFrameByTime(const std::vector<float>& times, float curTime, int& frameIndex, float& fParam)
+	{
+		if (times.empty()) return false;
+
+		if (curTime <= times[0]) {
+			frameIndex = 0;
+			fParam = 0;
+			return true;
+		}
+		for (int idx = 1; idx < times.size(); ++idx) {
+			if (curTime < times[idx] && times[idx] - times[idx - 1] > Eplison) {
+				frameIndex = idx - 1;
+				fParam = (curTime - times[idx - 1]) / (times[idx] - times[idx - 1]);
+				return true;
+			}
+		}
+		frameIndex = times.size();
+		fParam = 0;
+		return true;
+	}
 	void updateAnimation(float currentTime)
 	{
+		if (animation.duration <= Eplison) return;
 
+		currentTime = fmod(currentTime, animation.duration);
+		for (int i = 0; i < animation.size(); ++i) 
+		{
+			const AnimationTrack& track = animation[i];
+			Node* trackNode = nodeByIndex[i];
+
+			Transform transform(trackNode->bindMatrix);
+			for (int i = 0; i < track.samplers.size(); ++i) {
+				const AnimationSampler& sample = track.samplers[i];
+				if (!sample) continue;
+
+				int frameIndex = 0;
+				float fParam = 0;
+				if (!selectFrameByTime(sample.times, currentTime, frameIndex, fParam))
+					continue;
+
+				switch ((EAnimationTargetPath)i)
+				{
+				case kATPath_Translation: {
+					if (frameIndex < sample.translation.size())
+						transform.setTranslation(glm::mix(sample.translation[frameIndex], sample.translation[frameIndex + 1], fParam));
+					else
+						transform.setTranslation(sample.translation.back());
+				}break;
+				case kATPath_Rotation: {
+					if (frameIndex < sample.translation.size())
+						transform.setRotation(glm::slerp(sample.rotation[frameIndex], sample.rotation[frameIndex + 1], fParam));
+					else
+						transform.setRotation(sample.rotation.back());
+				}break;
+				case kATPath_Scale: {
+					if (frameIndex < sample.scale.size())
+						transform.setScale(glm::mix(sample.scale[frameIndex], sample.scale[frameIndex + 1], fParam));
+					else
+						transform.setScale(sample.scale.back());
+				}break;
+				case kATPath_Weight:
+				default:
+					break;
+				}
+			}
+			trackNode->curMatrix = transform.getMatrix();
+		}
 	}
 };
 
@@ -725,7 +846,7 @@ public:
 			const tinygltf::Scene& scene = glTFInput.scenes[0];
 			for (size_t i = 0; i < scene.nodes.size(); i++) {
 				const tinygltf::Node node = glTFInput.nodes[scene.nodes[i]];
-				glTFModel.loadNode(node, glTFInput, nullptr, indexBuffer, vertexBuffer);
+				glTFModel.loadNode(node, i, glTFInput, nullptr, indexBuffer, vertexBuffer);
 			}
 			glTFModel.loadAnimations(glTFInput);
 		}
