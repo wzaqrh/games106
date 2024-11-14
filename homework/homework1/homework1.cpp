@@ -588,6 +588,10 @@ public:
 		}
 	}
 
+	void updateAnimation(float currentTime)
+	{
+
+	}
 };
 
 class VulkanExample : public VulkanExampleBase
@@ -945,7 +949,57 @@ public:
 		prepared = true;
 	}
 
-	virtual void render()
+	float animationTime = 0.0f;
+	void updateAnimation(int currentBuffer)
+	{
+		animationTime += timerSpeed* frameTimer;
+
+		VkCommandBufferBeginInfo cmdBufInfo = vks::initializers::commandBufferBeginInfo();
+
+		VkClearValue clearValues[2];
+		clearValues[0].color = defaultClearColor;
+		clearValues[0].color = { { 0.25f, 0.25f, 0.25f, 1.0f } };;
+		clearValues[1].depthStencil = { 1.0f, 0 };
+
+		VkRenderPassBeginInfo renderPassBeginInfo = vks::initializers::renderPassBeginInfo();
+		renderPassBeginInfo.renderPass = renderPass;
+		renderPassBeginInfo.renderArea.offset.x = 0;
+		renderPassBeginInfo.renderArea.offset.y = 0;
+		renderPassBeginInfo.renderArea.extent.width = width;
+		renderPassBeginInfo.renderArea.extent.height = height;
+		renderPassBeginInfo.clearValueCount = 2;
+		renderPassBeginInfo.pClearValues = clearValues;
+
+		const VkViewport viewport = vks::initializers::viewport((float)width, (float)height, 0.0f, 1.0f);
+		const VkRect2D scissor = vks::initializers::rect2D(width, height, 0, 0);
+
+		renderPassBeginInfo.framebuffer = frameBuffers[currentBuffer];
+		VK_CHECK_RESULT(vkBeginCommandBuffer(drawCmdBuffers[currentBuffer], &cmdBufInfo));
+		vkCmdBeginRenderPass(drawCmdBuffers[currentBuffer], &renderPassBeginInfo, VK_SUBPASS_CONTENTS_INLINE);
+			vkCmdSetViewport(drawCmdBuffers[currentBuffer], 0, 1, &viewport);
+			vkCmdSetScissor(drawCmdBuffers[currentBuffer], 0, 1, &scissor);
+			// Bind scene matrices descriptor to set 0
+			vkCmdBindDescriptorSets(drawCmdBuffers[currentBuffer], VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 0, 1, &descriptorSet, 0, nullptr);
+			vkCmdBindPipeline(drawCmdBuffers[currentBuffer], VK_PIPELINE_BIND_POINT_GRAPHICS, wireframe ? pipelines.wireframe : pipelines.solid);
+			glTFModel.updateAnimation(animationTime);
+			glTFModel.draw(drawCmdBuffers[currentBuffer], pipelineLayout);
+			drawUI(drawCmdBuffers[currentBuffer]);
+		vkCmdEndRenderPass(drawCmdBuffers[currentBuffer]);
+		VK_CHECK_RESULT(vkEndCommandBuffer(drawCmdBuffers[currentBuffer]));
+	}
+	virtual void renderFrame() override
+	{
+		VulkanExampleBase::prepareFrame();
+
+		updateAnimation(currentBuffer);
+
+		submitInfo.commandBufferCount = 1;
+		submitInfo.pCommandBuffers = &drawCmdBuffers[currentBuffer];
+		VK_CHECK_RESULT(vkQueueSubmit(queue, 1, &submitInfo, VK_NULL_HANDLE));
+		VulkanExampleBase::submitFrame();
+	}
+
+	virtual void render() override
 	{
 		renderFrame();
 		if (camera.updated) {
@@ -953,12 +1007,12 @@ public:
 		}
 	}
 
-	virtual void viewChanged()
+	virtual void viewChanged() override
 	{
 		updateUniformBuffers();
 	}
 
-	virtual void OnUpdateUIOverlay(vks::UIOverlay *overlay)
+	virtual void OnUpdateUIOverlay(vks::UIOverlay *overlay) override
 	{
 		if (overlay->header("Settings")) {
 			if (overlay->checkBox("Wireframe", &wireframe)) {
