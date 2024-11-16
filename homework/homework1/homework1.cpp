@@ -715,7 +715,7 @@ public:
 	}
 };
 
-class VulkanExample : public VulkanExampleBase
+class VulkanHomework1 : public VulkanExampleBase
 {
 public:
 	bool wireframe = false;
@@ -745,7 +745,7 @@ public:
 		VkDescriptorSetLayout textures;
 	} descriptorSetLayouts;
 
-	VulkanExample() : VulkanExampleBase(ENABLE_VALIDATION)
+	VulkanHomework1() : VulkanExampleBase(ENABLE_VALIDATION)
 	{
 		title = "homework1";
 		camera.type = Camera::CameraType::lookat;
@@ -756,7 +756,7 @@ public:
 		timerSpeed = 1.0;
 	}
 
-	~VulkanExample()
+	~VulkanHomework1()
 	{
 		// Clean up used Vulkan resources
 		// Note : Inherited destructor cleans up resources stored in base class
@@ -780,44 +780,7 @@ public:
 		};
 	}
 
-	void buildCommandBuffers()
-	{
-		VkCommandBufferBeginInfo cmdBufInfo = vks::initializers::commandBufferBeginInfo();
-
-		VkClearValue clearValues[2];
-		clearValues[0].color = defaultClearColor;
-		clearValues[0].color = { { 0.25f, 0.25f, 0.25f, 1.0f } };;
-		clearValues[1].depthStencil = { 1.0f, 0 };
-
-		VkRenderPassBeginInfo renderPassBeginInfo = vks::initializers::renderPassBeginInfo();
-		renderPassBeginInfo.renderPass = renderPass;
-		renderPassBeginInfo.renderArea.offset.x = 0;
-		renderPassBeginInfo.renderArea.offset.y = 0;
-		renderPassBeginInfo.renderArea.extent.width = width;
-		renderPassBeginInfo.renderArea.extent.height = height;
-		renderPassBeginInfo.clearValueCount = 2;
-		renderPassBeginInfo.pClearValues = clearValues;
-
-		const VkViewport viewport = vks::initializers::viewport((float)width, (float)height, 0.0f, 1.0f);
-		const VkRect2D scissor = vks::initializers::rect2D(width, height, 0, 0);
-
-		for (int32_t i = 0; i < drawCmdBuffers.size(); ++i)
-		{
-			renderPassBeginInfo.framebuffer = frameBuffers[i];
-			VK_CHECK_RESULT(vkBeginCommandBuffer(drawCmdBuffers[i], &cmdBufInfo));
-			vkCmdBeginRenderPass(drawCmdBuffers[i], &renderPassBeginInfo, VK_SUBPASS_CONTENTS_INLINE);
-			vkCmdSetViewport(drawCmdBuffers[i], 0, 1, &viewport);
-			vkCmdSetScissor(drawCmdBuffers[i], 0, 1, &scissor);
-			// Bind scene matrices descriptor to set 0
-			vkCmdBindDescriptorSets(drawCmdBuffers[i], VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 0, 1, &descriptorSet, 0, nullptr);
-			vkCmdBindPipeline(drawCmdBuffers[i], VK_PIPELINE_BIND_POINT_GRAPHICS, wireframe ? pipelines.wireframe : pipelines.solid);
-			glTFModel.draw(drawCmdBuffers[i], pipelineLayout);
-			drawUI(drawCmdBuffers[i]);
-			vkCmdEndRenderPass(drawCmdBuffers[i]);
-			VK_CHECK_RESULT(vkEndCommandBuffer(drawCmdBuffers[i]));
-		}
-	}
-
+#pragma region prepare
 	void loadglTFFile(std::string filename)
 	{
 		tinygltf::Model glTFInput;
@@ -928,10 +891,25 @@ public:
 		vkDestroyBuffer(device, indexStaging.buffer, nullptr);
 		vkFreeMemory(device, indexStaging.memory, nullptr);
 	}
-
 	void loadAssets()
 	{
 		loadglTFFile(getAssetPath() + "buster_drone/busterDrone.gltf");
+	}
+
+	// Prepare and initialize uniform buffer containing shader uniforms
+	void prepareUniformBuffers()
+	{
+		// Vertex shader uniform buffer block
+		VK_CHECK_RESULT(vulkanDevice->createBuffer(
+			VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+			VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+			&shaderData.buffer,
+			sizeof(shaderData.values)));
+
+		// Map persistent
+		VK_CHECK_RESULT(shaderData.buffer.map());
+
+		updateUniformBuffers();
 	}
 
 	void setupDescriptors()
@@ -1036,28 +1014,42 @@ public:
 		}
 	}
 
-	// Prepare and initialize uniform buffer containing shader uniforms
-	void prepareUniformBuffers()
+	void buildCommandBuffers()
 	{
-		// Vertex shader uniform buffer block
-		VK_CHECK_RESULT(vulkanDevice->createBuffer(
-			VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
-			VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-			&shaderData.buffer,
-			sizeof(shaderData.values)));
+		VkCommandBufferBeginInfo cmdBufInfo = vks::initializers::commandBufferBeginInfo();
 
-		// Map persistent
-		VK_CHECK_RESULT(shaderData.buffer.map());
+		VkClearValue clearValues[2];
+		clearValues[0].color = defaultClearColor;
+		clearValues[0].color = { { 0.25f, 0.25f, 0.25f, 1.0f } };;
+		clearValues[1].depthStencil = { 1.0f, 0 };
 
-		updateUniformBuffers();
-	}
+		VkRenderPassBeginInfo renderPassBeginInfo = vks::initializers::renderPassBeginInfo();
+		renderPassBeginInfo.renderPass = renderPass;
+		renderPassBeginInfo.renderArea.offset.x = 0;
+		renderPassBeginInfo.renderArea.offset.y = 0;
+		renderPassBeginInfo.renderArea.extent.width = width;
+		renderPassBeginInfo.renderArea.extent.height = height;
+		renderPassBeginInfo.clearValueCount = 2;
+		renderPassBeginInfo.pClearValues = clearValues;
 
-	void updateUniformBuffers()
-	{
-		shaderData.values.projection = camera.matrices.perspective;
-		shaderData.values.model = camera.matrices.view;
-		shaderData.values.viewPos = camera.viewPos;
-		memcpy(shaderData.buffer.mapped, &shaderData.values, sizeof(shaderData.values));
+		const VkViewport viewport = vks::initializers::viewport((float)width, (float)height, 0.0f, 1.0f);
+		const VkRect2D scissor = vks::initializers::rect2D(width, height, 0, 0);
+
+		for (int32_t i = 0; i < drawCmdBuffers.size(); ++i)
+		{
+			renderPassBeginInfo.framebuffer = frameBuffers[i];
+			VK_CHECK_RESULT(vkBeginCommandBuffer(drawCmdBuffers[i], &cmdBufInfo));
+			vkCmdBeginRenderPass(drawCmdBuffers[i], &renderPassBeginInfo, VK_SUBPASS_CONTENTS_INLINE);
+			vkCmdSetViewport(drawCmdBuffers[i], 0, 1, &viewport);
+			vkCmdSetScissor(drawCmdBuffers[i], 0, 1, &scissor);
+			// Bind scene matrices descriptor to set 0
+			vkCmdBindDescriptorSets(drawCmdBuffers[i], VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 0, 1, &descriptorSet, 0, nullptr);
+			vkCmdBindPipeline(drawCmdBuffers[i], VK_PIPELINE_BIND_POINT_GRAPHICS, wireframe ? pipelines.wireframe : pipelines.solid);
+			glTFModel.draw(drawCmdBuffers[i], pipelineLayout);
+			drawUI(drawCmdBuffers[i]);
+			vkCmdEndRenderPass(drawCmdBuffers[i]);
+			VK_CHECK_RESULT(vkEndCommandBuffer(drawCmdBuffers[i]));
+		}
 	}
 
 	void prepare()
@@ -1070,7 +1062,9 @@ public:
 		buildCommandBuffers();
 		prepared = true;
 	}
+#pragma endregion
 
+#pragma region render
 	float animationTime = 0.0f;
 	void updateAnimation(int currentBuffer)
 	{
@@ -1109,7 +1103,8 @@ public:
 		vkCmdEndRenderPass(drawCmdBuffers[currentBuffer]);
 		VK_CHECK_RESULT(vkEndCommandBuffer(drawCmdBuffers[currentBuffer]));
 	}
-	virtual void renderFrame() override
+	
+	void myRrenderFrame()
 	{
 		VulkanExampleBase::prepareFrame();
 
@@ -1121,13 +1116,22 @@ public:
 		VulkanExampleBase::submitFrame();
 	}
 
+	void updateUniformBuffers()
+	{
+		shaderData.values.projection = camera.matrices.perspective;
+		shaderData.values.model = camera.matrices.view;
+		shaderData.values.viewPos = camera.viewPos;
+		memcpy(shaderData.buffer.mapped, &shaderData.values, sizeof(shaderData.values));
+	}
+
 	virtual void render() override
 	{
-		renderFrame();
+		myRrenderFrame();
 		if (camera.updated) {
 			updateUniformBuffers();
 		}
 	}
+#pragma endregion
 
 	virtual void viewChanged() override
 	{
@@ -1144,4 +1148,23 @@ public:
 	}
 };
 
-VULKAN_EXAMPLE_MAIN()
+VulkanHomework1* vulkanExample;
+LRESULT CALLBACK WndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
+{
+	if (vulkanExample != NULL)
+	{
+		vulkanExample->handleMessages(hWnd, uMsg, wParam, lParam);
+	}
+	return (DefWindowProc(hWnd, uMsg, wParam, lParam));
+}
+int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int)
+{
+	for (int32_t i = 0; i < __argc; i++) { VulkanHomework1::args.push_back(__argv[i]); };
+	vulkanExample = new VulkanHomework1();
+	vulkanExample->initVulkan();
+	vulkanExample->setupWindow(hInstance, WndProc);
+	vulkanExample->prepare();
+	vulkanExample->renderLoop();
+	delete(vulkanExample);
+	return 0;
+}
