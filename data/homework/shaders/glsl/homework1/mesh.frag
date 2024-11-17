@@ -129,4 +129,6 @@ void main()
 	color = pow(color, vec3(0.4545));
 
 	outFragColor = vec4(color, 1.0);
+
+	outFragColor = vec4(albedo.rgb, 1.0);
 }

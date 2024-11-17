@@ -110,7 +110,7 @@ VkResult VulkanExampleBase::createInstance(bool enableValidation)
 		if (settings.validation)
 		{
 			// vkCreateDebugReportCallbackEXT 
-			instanceExtensions.push_back(VK_EXT_DEBUG_REPORT_EXTENSION_NAME);	// SRS - Dependency when VK_EXT_DEBUG_MARKER is enabled
+			//instanceExtensions.push_back(VK_EXT_DEBUG_REPORT_EXTENSION_NAME);	// SRS - Dependency when VK_EXT_DEBUG_MARKER is enabled
 			// vkCreateDebugUtilsMessengerEXT 
 			instanceExtensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
 		}

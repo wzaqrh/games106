@@ -631,10 +631,11 @@ public:
 				if (primitive.indexCount > 0) {
 					const auto& mtl = materials[primitive.materialIndex];
 					VulkanglTFModel::Texture texture = textures[mtl.baseColorTextureIndex];
-					vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 1, 1, &images[texture.imageIndex].descriptorSet, 0, nullptr);
+					constexpr int FirstSet = 2;
+					vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, FirstSet, 1, &images[texture.imageIndex].descriptorSet, 0, nullptr);
 					
 					PushBlock_Material pb(mtl.name, mtl.baseColorFactor, mtl.roughnessFactor, mtl.metallicFactor);
-					vkCmdPushConstants(commandBuffer, pipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(PushBlock_Material::PushBlock), &pb.params);
+					//vkCmdPushConstants(commandBuffer, pipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(PushBlock_Material::PushBlock), &pb.params);
 
 					vkCmdDrawIndexed(commandBuffer, primitive.indexCount, 1, primitive.firstIndex, 0, 0);
 				}
@@ -765,7 +766,7 @@ public:
 	} pipelines;
 
 	VkPipelineLayout pipelineLayout;
-	VkDescriptorSet descriptorSet;
+	std::array<VkDescriptorSet, 2> descriptorSets;
 
 	struct DescriptorSetLayouts {
 		VkDescriptorSetLayout uboMatrices;
@@ -782,6 +783,8 @@ public:
 		camera.setRotation(glm::vec3(0.0f, 45.0f, 0.0f));
 		camera.setPerspective(60.0f, (float)width / (float)height, 0.1f, 256.0f);
 		timerSpeed = 1.0;
+
+		settings.validation = true;
 	}
 
 	~VulkanHomework1()
@@ -977,18 +980,23 @@ public:
 		VkDescriptorPoolCreateInfo descriptorPoolInfo = vks::initializers::descriptorPoolCreateInfo(poolSizes, maxSetCount);
 		VK_CHECK_RESULT(vkCreateDescriptorPool(device, &descriptorPoolInfo, nullptr, &descriptorPool));
 
-		VkDescriptorSetLayoutBinding setLayoutBinding_Matrices = vks::initializers::descriptorSetLayoutBinding(VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0);
-		VkDescriptorSetLayoutCreateInfo descriptorSetLayoutCI_Matrices = vks::initializers::descriptorSetLayoutCreateInfo(&setLayoutBinding_Matrices, 1);
-		VK_CHECK_RESULT(vkCreateDescriptorSetLayout(device, &descriptorSetLayoutCI_Matrices, nullptr, &descriptorSetLayouts.uboMatrices));
-		
-		VkDescriptorSetLayoutBinding setLayoutBinding_Params = vks::initializers::descriptorSetLayoutBinding(VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0);
-		VkDescriptorSetLayoutCreateInfo descriptorSetLayoutCI_Params = vks::initializers::descriptorSetLayoutCreateInfo(&setLayoutBinding_Params, 1);
-		VK_CHECK_RESULT(vkCreateDescriptorSetLayout(device, &descriptorSetLayoutCI_Params, nullptr, &descriptorSetLayouts.uboParams));
+		constexpr int Binding_0 = 0;
+		constexpr int Binding_1 = 1;
+		constexpr int Binding_2 = 2;
+		{
+			VkDescriptorSetLayoutBinding setLayoutBinding_Matrices = vks::initializers::descriptorSetLayoutBinding(VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, Binding_0);
+			VkDescriptorSetLayoutCreateInfo descriptorSetLayoutCI_Matrices = vks::initializers::descriptorSetLayoutCreateInfo(&setLayoutBinding_Matrices, 1);
+			VK_CHECK_RESULT(vkCreateDescriptorSetLayout(device, &descriptorSetLayoutCI_Matrices, nullptr, &descriptorSetLayouts.uboMatrices));
 
-		VkDescriptorSetLayoutBinding setLayoutBinding_Tex = vks::initializers::descriptorSetLayoutBinding(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT, 0);
-		VkDescriptorSetLayoutCreateInfo descriptorSetLayoutCI_Tex = vks::initializers::descriptorSetLayoutCreateInfo(&setLayoutBinding_Tex, 1);
-		VK_CHECK_RESULT(vkCreateDescriptorSetLayout(device, &descriptorSetLayoutCI_Tex, nullptr, &descriptorSetLayouts.textures));
-		
+			VkDescriptorSetLayoutBinding setLayoutBinding_Params = vks::initializers::descriptorSetLayoutBinding(VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, Binding_1);
+			VkDescriptorSetLayoutCreateInfo descriptorSetLayoutCI_Params = vks::initializers::descriptorSetLayoutCreateInfo(&setLayoutBinding_Params, 1);
+			VK_CHECK_RESULT(vkCreateDescriptorSetLayout(device, &descriptorSetLayoutCI_Params, nullptr, &descriptorSetLayouts.uboParams));
+
+			VkDescriptorSetLayoutBinding setLayoutBinding_Tex = vks::initializers::descriptorSetLayoutBinding(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT, Binding_2);
+			VkDescriptorSetLayoutCreateInfo descriptorSetLayoutCI_Tex = vks::initializers::descriptorSetLayoutCreateInfo(&setLayoutBinding_Tex, 1);
+			VK_CHECK_RESULT(vkCreateDescriptorSetLayout(device, &descriptorSetLayoutCI_Tex, nullptr, &descriptorSetLayouts.textures));
+		}
+
 		// Pipeline layout using both descriptor sets (set 0 = matrices, set 1 = material)
 		std::array<VkDescriptorSetLayout, 3> setLayouts = { 
 			descriptorSetLayouts.uboMatrices, 
@@ -1006,24 +1014,21 @@ public:
 		pipelineLayoutCI.pPushConstantRanges = pushConstantRanges.data();
 		VK_CHECK_RESULT(vkCreatePipelineLayout(device, &pipelineLayoutCI, nullptr, &pipelineLayout));
 
-		constexpr int Binding_0 = 0;
-		constexpr int Binding_1 = 1;
-		constexpr int Binding_2 = 2;
 		// Descriptor set for scene matrices && params
 		VkDescriptorSetAllocateInfo allocInfo = vks::initializers::descriptorSetAllocateInfo(descriptorPool, &descriptorSetLayouts.uboMatrices, 2);
-		VK_CHECK_RESULT(vkAllocateDescriptorSets(device, &allocInfo, &descriptorSet));
+		VK_CHECK_RESULT(vkAllocateDescriptorSets(device, &allocInfo, &descriptorSets[0]));
 		std::array<VkWriteDescriptorSet, 2> writeDescriptorSet = {
-			vks::initializers::writeDescriptorSet(descriptorSet, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, Binding_0, &uniformBuffers.object.descriptor),
-			vks::initializers::writeDescriptorSet(descriptorSet, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, Binding_1, &uniformBuffers.params.descriptor)
+			vks::initializers::writeDescriptorSet(descriptorSets[0], VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, Binding_0, &uniformBuffers.object.descriptor),
+			vks::initializers::writeDescriptorSet(descriptorSets[1], VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, Binding_1, &uniformBuffers.params.descriptor)
 		};
 		vkUpdateDescriptorSets(device, writeDescriptorSet.size(), writeDescriptorSet.data(), 0, nullptr);
 		
 		// Descriptor sets for materials
 		for (auto& image : glTFModel.images) {
-			const VkDescriptorSetAllocateInfo allocInfo = vks::initializers::descriptorSetAllocateInfo(descriptorPool, &descriptorSetLayouts.textures, Binding_2);
+			const VkDescriptorSetAllocateInfo allocInfo = vks::initializers::descriptorSetAllocateInfo(descriptorPool, &descriptorSetLayouts.textures, 1);
 			VK_CHECK_RESULT(vkAllocateDescriptorSets(device, &allocInfo, &image.descriptorSet));
 			
-			VkWriteDescriptorSet writeDescriptorSet = vks::initializers::writeDescriptorSet(image.descriptorSet, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 0, &image.texture.descriptor);
+			VkWriteDescriptorSet writeDescriptorSet = vks::initializers::writeDescriptorSet(image.descriptorSet, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, Binding_2, &image.texture.descriptor);
 			vkUpdateDescriptorSets(device, 1, &writeDescriptorSet, 0, nullptr);
 		}
 	}
@@ -1090,7 +1095,7 @@ public:
 
 		VkClearValue clearValues[2];
 		clearValues[0].color = defaultClearColor;
-		clearValues[0].color = { { 0.25f, 0.25f, 0.25f, 1.0f } };;
+		clearValues[0].color = { { 1.0f, 0.0f, 0.0f, 1.0f } };
 		clearValues[1].depthStencil = { 1.0f, 0 };
 
 		VkRenderPassBeginInfo renderPassBeginInfo = vks::initializers::renderPassBeginInfo();
@@ -1113,7 +1118,8 @@ public:
 				vkCmdSetViewport(drawCmdBuffers[i], 0, 1, &viewport);
 				vkCmdSetScissor(drawCmdBuffers[i], 0, 1, &scissor);
 				// Bind scene matrices descriptor to set 0
-				vkCmdBindDescriptorSets(drawCmdBuffers[i], VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 0, 1, &descriptorSet, 0, nullptr);
+				constexpr int FirstSet = 0;
+				vkCmdBindDescriptorSets(drawCmdBuffers[i], VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, FirstSet, descriptorSets.size(), descriptorSets.data(), 0, nullptr);
 				vkCmdBindPipeline(drawCmdBuffers[i], VK_PIPELINE_BIND_POINT_GRAPHICS, wireframe ? pipelines.wireframe : pipelines.solid);
 				
 				glTFModel.draw(drawCmdBuffers[i], pipelineLayout);
@@ -1166,7 +1172,8 @@ public:
 			vkCmdSetViewport(drawCmdBuffers[currentBuffer], 0, 1, &viewport);
 			vkCmdSetScissor(drawCmdBuffers[currentBuffer], 0, 1, &scissor);
 			// Bind scene matrices descriptor to set 0
-			vkCmdBindDescriptorSets(drawCmdBuffers[currentBuffer], VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 0, 1, &descriptorSet, 0, nullptr);
+			constexpr int FirstSet = 0;
+			vkCmdBindDescriptorSets(drawCmdBuffers[currentBuffer], VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, FirstSet, descriptorSets.size(), descriptorSets.data(), 0, nullptr);
 			vkCmdBindPipeline(drawCmdBuffers[currentBuffer], VK_PIPELINE_BIND_POINT_GRAPHICS, wireframe ? pipelines.wireframe : pipelines.solid);
 			glTFModel.updateAnimation(animationTime);
 			glTFModel.draw(drawCmdBuffers[currentBuffer], pipelineLayout);
