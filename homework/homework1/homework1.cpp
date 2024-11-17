@@ -29,8 +29,24 @@
 
 #define ENABLE_VALIDATION false
 
-// Contains everything required to render a glTF model in Vulkan
-// This class is heavily simplified (compared to glTF's feature set) but retains the basic glTF structure
+struct PushBlock_Material {
+	// Parameter block used as push constant block
+	struct PushBlock {
+		float roughness;
+		float metallic;
+		float r, g, b;
+	} params{};
+	std::string name;
+	PushBlock_Material() {};
+	PushBlock_Material(std::string n, glm::vec4 c, float r, float m) : name(n) {
+		params.roughness = r;
+		params.metallic = m;
+		params.r = c.r;
+		params.g = c.g;
+		params.b = c.b;
+	};
+};
+
 class VulkanglTFModel
 {
 public:
@@ -208,8 +224,11 @@ public:
 
 	// A glTF material stores information in e.g. the texture that is attached to it and colors
 	struct Material {
+		std::string name;
 		glm::vec4 baseColorFactor = glm::vec4(1.0f);
 		uint32_t baseColorTextureIndex;
+		float metallicFactor = 1.0f;
+		float roughnessFactor = 1.0f;
 	};
 
 	// Contains the texture for a single glTF image
@@ -309,14 +328,11 @@ public:
 		for (size_t i = 0; i < input.materials.size(); i++) {
 			// We only read the most basic properties required for our sample
 			tinygltf::Material glTFMaterial = input.materials[i];
-			// Get the base color factor
-			if (glTFMaterial.values.find("baseColorFactor") != glTFMaterial.values.end()) {
-				materials[i].baseColorFactor = glm::make_vec4(glTFMaterial.values["baseColorFactor"].ColorFactor().data());
-			}
-			// Get base color texture index
-			if (glTFMaterial.values.find("baseColorTexture") != glTFMaterial.values.end()) {
-				materials[i].baseColorTextureIndex = glTFMaterial.values["baseColorTexture"].TextureIndex();
-			}
+			if (glTFMaterial.values.count("baseColorFactor")) materials[i].baseColorFactor = glm::make_vec4(glTFMaterial.values["baseColorFactor"].ColorFactor().data());
+			if (glTFMaterial.values.count("baseColorTexture")) materials[i].baseColorTextureIndex = glTFMaterial.values["baseColorTexture"].TextureIndex();
+
+			if (glTFMaterial.values.count("metallicFactor")) materials[i].metallicFactor = glTFMaterial.values["metallicFactor"].Factor();
+			if (glTFMaterial.values.count("roughnessFactor")) materials[i].roughnessFactor = glTFMaterial.values["roughnessFactor"].Factor();
 		}
 	}
 
@@ -595,10 +611,6 @@ public:
 		}
 	}
 
-	/*
-		glTF rendering functions
-	*/
-
 	// Draw a single node including child nodes (if present)
 	void drawNode(VkCommandBuffer commandBuffer, VkPipelineLayout pipelineLayout, VulkanglTFModel::Node* node)
 	{
@@ -611,14 +623,19 @@ public:
 				nodeMatrix = currentParent->curMatrix * nodeMatrix;
 				currentParent = currentParent->parent;
 			}
+			
 			// Pass the final matrix to the vertex shader using push constants
 			vkCmdPushConstants(commandBuffer, pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(glm::mat4), &nodeMatrix);
+
 			for (VulkanglTFModel::Primitive& primitive : node->mesh.primitives) {
 				if (primitive.indexCount > 0) {
-					// Get the texture index for this primitive
-					VulkanglTFModel::Texture texture = textures[materials[primitive.materialIndex].baseColorTextureIndex];
-					// Bind the descriptor for the current primitive's texture
+					const auto& mtl = materials[primitive.materialIndex];
+					VulkanglTFModel::Texture texture = textures[mtl.baseColorTextureIndex];
 					vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 1, 1, &images[texture.imageIndex].descriptorSet, 0, nullptr);
+					
+					PushBlock_Material pb(mtl.name, mtl.baseColorFactor, mtl.roughnessFactor, mtl.metallicFactor);
+					vkCmdPushConstants(commandBuffer, pipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(PushBlock_Material::PushBlock), &pb.params);
+
 					vkCmdDrawIndexed(commandBuffer, primitive.indexCount, 1, primitive.firstIndex, 0, 0);
 				}
 			}
@@ -715,22 +732,32 @@ public:
 	}
 };
 
-class VulkanHomework1 : public VulkanExampleBase
+struct PbrStruct
+{
+	struct {
+		vks::Buffer object;
+		vks::Buffer params;
+	} uniformBuffers;
+
+	struct UBOMatrices {
+		glm::mat4 projection;
+		glm::mat4 view;
+		glm::vec3 camPos;
+	} uboMatrices;
+
+	struct UBOParams {
+		glm::vec4 lights[4];
+	} uboParams;
+};
+
+class VulkanHomework1 
+	: public VulkanExampleBase
+	, public PbrStruct
 {
 public:
 	bool wireframe = false;
 
 	VulkanglTFModel glTFModel;
-
-	struct ShaderData {
-		vks::Buffer buffer;
-		struct Values {
-			glm::mat4 projection;
-			glm::mat4 model;
-			glm::vec4 lightPos = glm::vec4(5.0f, 5.0f, -5.0f, 1.0f);
-			glm::vec4 viewPos;
-		} values;
-	} shaderData;
 
 	struct Pipelines {
 		VkPipeline solid;
@@ -741,7 +768,8 @@ public:
 	VkDescriptorSet descriptorSet;
 
 	struct DescriptorSetLayouts {
-		VkDescriptorSetLayout matrices;
+		VkDescriptorSetLayout uboMatrices;
+		VkDescriptorSetLayout uboParams;
 		VkDescriptorSetLayout textures;
 	} descriptorSetLayouts;
 
@@ -766,10 +794,12 @@ public:
 		}
 
 		vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
-		vkDestroyDescriptorSetLayout(device, descriptorSetLayouts.matrices, nullptr);
+		vkDestroyDescriptorSetLayout(device, descriptorSetLayouts.uboMatrices, nullptr);
+		vkDestroyDescriptorSetLayout(device, descriptorSetLayouts.uboParams, nullptr);
 		vkDestroyDescriptorSetLayout(device, descriptorSetLayouts.textures, nullptr);
 
-		shaderData.buffer.destroy();
+		uniformBuffers.object.destroy();
+		uniformBuffers.params.destroy();
 	}
 
 	virtual void getEnabledFeatures()
@@ -899,61 +929,100 @@ public:
 	// Prepare and initialize uniform buffer containing shader uniforms
 	void prepareUniformBuffers()
 	{
-		// Vertex shader uniform buffer block
-		VK_CHECK_RESULT(vulkanDevice->createBuffer(
-			VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
-			VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-			&shaderData.buffer,
-			sizeof(shaderData.values)));
+		// Object vertex shader uniform buffer
+		VK_CHECK_RESULT(vulkanDevice->createBuffer(VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, &uniformBuffers.object, sizeof(uboMatrices)));
+		VK_CHECK_RESULT(uniformBuffers.object.map());
 
-		// Map persistent
-		VK_CHECK_RESULT(shaderData.buffer.map());
+		// Shared parameter uniform buffer
+		VK_CHECK_RESULT(vulkanDevice->createBuffer(VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, &uniformBuffers.params, sizeof(uboParams)));
+		VK_CHECK_RESULT(uniformBuffers.params.map());
 
 		updateUniformBuffers();
+	}
+	void updateUniformBuffers()
+	{
+		{
+			uboMatrices.projection = camera.matrices.perspective;
+			uboMatrices.view = camera.matrices.view;
+			uboMatrices.camPos = camera.position * -1.0f;
+			memcpy(uniformBuffers.object.mapped, &uboMatrices, sizeof(uboMatrices));
+		}
+
+		{
+			const float p = 15.0f;
+			uboParams.lights[0] = glm::vec4(-p, -p * 0.5f, -p, 1.0f);
+			uboParams.lights[1] = glm::vec4(-p, -p * 0.5f, p, 1.0f);
+			uboParams.lights[2] = glm::vec4(p, -p * 0.5f, p, 1.0f);
+			uboParams.lights[3] = glm::vec4(p, -p * 0.5f, -p, 1.0f);
+			if (!paused)
+			{
+				uboParams.lights[0].x = sin(glm::radians(timer * 360.0f)) * 20.0f;
+				uboParams.lights[0].z = cos(glm::radians(timer * 360.0f)) * 20.0f;
+				uboParams.lights[1].x = cos(glm::radians(timer * 360.0f)) * 20.0f;
+				uboParams.lights[1].y = sin(glm::radians(timer * 360.0f)) * 20.0f;
+			}
+			memcpy(uniformBuffers.params.mapped, &uboParams, sizeof(uboParams));
+		}
 	}
 
 	void setupDescriptors()
 	{
-		/*
-			This sample uses separate descriptor sets (and layouts) for the matrices and materials (textures)
-		*/
-
+		constexpr int MaxUniformCount = 4;
 		std::vector<VkDescriptorPoolSize> poolSizes = {
-			vks::initializers::descriptorPoolSize(VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1),
+			vks::initializers::descriptorPoolSize(VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, MaxUniformCount),
 			// One combined image sampler per model image/texture
 			vks::initializers::descriptorPoolSize(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, static_cast<uint32_t>(glTFModel.images.size())),
 		};
-		// One set for matrices and one per model image/texture
-		const uint32_t maxSetCount = static_cast<uint32_t>(glTFModel.images.size()) + 1;
+		const uint32_t maxSetCount = static_cast<uint32_t>(glTFModel.images.size()) + MaxUniformCount;
 		VkDescriptorPoolCreateInfo descriptorPoolInfo = vks::initializers::descriptorPoolCreateInfo(poolSizes, maxSetCount);
 		VK_CHECK_RESULT(vkCreateDescriptorPool(device, &descriptorPoolInfo, nullptr, &descriptorPool));
 
-		// Descriptor set layout for passing matrices
-		VkDescriptorSetLayoutBinding setLayoutBinding = vks::initializers::descriptorSetLayoutBinding(VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VK_SHADER_STAGE_VERTEX_BIT, 0);
-		VkDescriptorSetLayoutCreateInfo descriptorSetLayoutCI = vks::initializers::descriptorSetLayoutCreateInfo(&setLayoutBinding, 1);
-		VK_CHECK_RESULT(vkCreateDescriptorSetLayout(device, &descriptorSetLayoutCI, nullptr, &descriptorSetLayouts.matrices));
-		// Descriptor set layout for passing material textures
-		setLayoutBinding = vks::initializers::descriptorSetLayoutBinding(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT, 0);
-		VK_CHECK_RESULT(vkCreateDescriptorSetLayout(device, &descriptorSetLayoutCI, nullptr, &descriptorSetLayouts.textures));
+		VkDescriptorSetLayoutBinding setLayoutBinding_Matrices = vks::initializers::descriptorSetLayoutBinding(VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0);
+		VkDescriptorSetLayoutCreateInfo descriptorSetLayoutCI_Matrices = vks::initializers::descriptorSetLayoutCreateInfo(&setLayoutBinding_Matrices, 1);
+		VK_CHECK_RESULT(vkCreateDescriptorSetLayout(device, &descriptorSetLayoutCI_Matrices, nullptr, &descriptorSetLayouts.uboMatrices));
+		
+		VkDescriptorSetLayoutBinding setLayoutBinding_Params = vks::initializers::descriptorSetLayoutBinding(VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0);
+		VkDescriptorSetLayoutCreateInfo descriptorSetLayoutCI_Params = vks::initializers::descriptorSetLayoutCreateInfo(&setLayoutBinding_Params, 1);
+		VK_CHECK_RESULT(vkCreateDescriptorSetLayout(device, &descriptorSetLayoutCI_Params, nullptr, &descriptorSetLayouts.uboParams));
+
+		VkDescriptorSetLayoutBinding setLayoutBinding_Tex = vks::initializers::descriptorSetLayoutBinding(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT, 0);
+		VkDescriptorSetLayoutCreateInfo descriptorSetLayoutCI_Tex = vks::initializers::descriptorSetLayoutCreateInfo(&setLayoutBinding_Tex, 1);
+		VK_CHECK_RESULT(vkCreateDescriptorSetLayout(device, &descriptorSetLayoutCI_Tex, nullptr, &descriptorSetLayouts.textures));
+		
 		// Pipeline layout using both descriptor sets (set 0 = matrices, set 1 = material)
-		std::array<VkDescriptorSetLayout, 2> setLayouts = { descriptorSetLayouts.matrices, descriptorSetLayouts.textures };
-		VkPipelineLayoutCreateInfo pipelineLayoutCI= vks::initializers::pipelineLayoutCreateInfo(setLayouts.data(), static_cast<uint32_t>(setLayouts.size()));
-		// We will use push constants to push the local matrices of a primitive to the vertex shader
-		VkPushConstantRange pushConstantRange = vks::initializers::pushConstantRange(VK_SHADER_STAGE_VERTEX_BIT, sizeof(glm::mat4), 0);
-		// Push constant ranges are part of the pipeline layout
-		pipelineLayoutCI.pushConstantRangeCount = 1;
-		pipelineLayoutCI.pPushConstantRanges = &pushConstantRange;
+		std::array<VkDescriptorSetLayout, 3> setLayouts = { 
+			descriptorSetLayouts.uboMatrices, 
+			descriptorSetLayouts.uboParams,
+			descriptorSetLayouts.textures 
+		};
+		VkPipelineLayoutCreateInfo pipelineLayoutCI = vks::initializers::pipelineLayoutCreateInfo(setLayouts.data(), static_cast<uint32_t>(setLayouts.size()));
+
+		// Pipeline layout will also use push constants to push the local matrices of a primitive to the vertex shader
+		std::vector<VkPushConstantRange> pushConstantRanges = {
+			vks::initializers::pushConstantRange(VK_SHADER_STAGE_VERTEX_BIT, sizeof(glm::mat4), 0),
+			vks::initializers::pushConstantRange(VK_SHADER_STAGE_FRAGMENT_BIT, sizeof(PushBlock_Material::PushBlock), sizeof(glm::mat4)),
+		};
+		pipelineLayoutCI.pushConstantRangeCount = pushConstantRanges.size();
+		pipelineLayoutCI.pPushConstantRanges = pushConstantRanges.data();
 		VK_CHECK_RESULT(vkCreatePipelineLayout(device, &pipelineLayoutCI, nullptr, &pipelineLayout));
 
-		// Descriptor set for scene matrices
-		VkDescriptorSetAllocateInfo allocInfo = vks::initializers::descriptorSetAllocateInfo(descriptorPool, &descriptorSetLayouts.matrices, 1);
+		constexpr int Binding_0 = 0;
+		constexpr int Binding_1 = 1;
+		constexpr int Binding_2 = 2;
+		// Descriptor set for scene matrices && params
+		VkDescriptorSetAllocateInfo allocInfo = vks::initializers::descriptorSetAllocateInfo(descriptorPool, &descriptorSetLayouts.uboMatrices, 2);
 		VK_CHECK_RESULT(vkAllocateDescriptorSets(device, &allocInfo, &descriptorSet));
-		VkWriteDescriptorSet writeDescriptorSet = vks::initializers::writeDescriptorSet(descriptorSet, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 0, &shaderData.buffer.descriptor);
-		vkUpdateDescriptorSets(device, 1, &writeDescriptorSet, 0, nullptr);
+		std::array<VkWriteDescriptorSet, 2> writeDescriptorSet = {
+			vks::initializers::writeDescriptorSet(descriptorSet, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, Binding_0, &uniformBuffers.object.descriptor),
+			vks::initializers::writeDescriptorSet(descriptorSet, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, Binding_1, &uniformBuffers.params.descriptor)
+		};
+		vkUpdateDescriptorSets(device, writeDescriptorSet.size(), writeDescriptorSet.data(), 0, nullptr);
+		
 		// Descriptor sets for materials
 		for (auto& image : glTFModel.images) {
-			const VkDescriptorSetAllocateInfo allocInfo = vks::initializers::descriptorSetAllocateInfo(descriptorPool, &descriptorSetLayouts.textures, 1);
+			const VkDescriptorSetAllocateInfo allocInfo = vks::initializers::descriptorSetAllocateInfo(descriptorPool, &descriptorSetLayouts.textures, Binding_2);
 			VK_CHECK_RESULT(vkAllocateDescriptorSets(device, &allocInfo, &image.descriptorSet));
+			
 			VkWriteDescriptorSet writeDescriptorSet = vks::initializers::writeDescriptorSet(image.descriptorSet, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 0, &image.texture.descriptor);
 			vkUpdateDescriptorSets(device, 1, &writeDescriptorSet, 0, nullptr);
 		}
@@ -971,20 +1040,21 @@ public:
 		const std::vector<VkDynamicState> dynamicStateEnables = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
 		VkPipelineDynamicStateCreateInfo dynamicStateCI = vks::initializers::pipelineDynamicStateCreateInfo(dynamicStateEnables.data(), static_cast<uint32_t>(dynamicStateEnables.size()), 0);
 		// Vertex input bindings and attributes
-		const std::vector<VkVertexInputBindingDescription> vertexInputBindings = {
-			vks::initializers::vertexInputBindingDescription(0, sizeof(VulkanglTFModel::Vertex), VK_VERTEX_INPUT_RATE_VERTEX),
-		};
-		const std::vector<VkVertexInputAttributeDescription> vertexInputAttributes = {
-			vks::initializers::vertexInputAttributeDescription(0, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(VulkanglTFModel::Vertex, pos)),	// Location 0: Position
-			vks::initializers::vertexInputAttributeDescription(0, 1, VK_FORMAT_R32G32B32_SFLOAT, offsetof(VulkanglTFModel::Vertex, normal)),// Location 1: Normal
-			vks::initializers::vertexInputAttributeDescription(0, 2, VK_FORMAT_R32G32B32_SFLOAT, offsetof(VulkanglTFModel::Vertex, uv)),	// Location 2: Texture coordinates
-			vks::initializers::vertexInputAttributeDescription(0, 3, VK_FORMAT_R32G32B32_SFLOAT, offsetof(VulkanglTFModel::Vertex, color)),	// Location 3: Color
-		};
 		VkPipelineVertexInputStateCreateInfo vertexInputStateCI = vks::initializers::pipelineVertexInputStateCreateInfo();
-		vertexInputStateCI.vertexBindingDescriptionCount = static_cast<uint32_t>(vertexInputBindings.size());
-		vertexInputStateCI.pVertexBindingDescriptions = vertexInputBindings.data();
-		vertexInputStateCI.vertexAttributeDescriptionCount = static_cast<uint32_t>(vertexInputAttributes.size());
-		vertexInputStateCI.pVertexAttributeDescriptions = vertexInputAttributes.data();
+			const std::vector<VkVertexInputBindingDescription> vertexInputBindings = {
+				vks::initializers::vertexInputBindingDescription(0, sizeof(VulkanglTFModel::Vertex), VK_VERTEX_INPUT_RATE_VERTEX),
+			};
+			vertexInputStateCI.vertexBindingDescriptionCount = static_cast<uint32_t>(vertexInputBindings.size());
+			vertexInputStateCI.pVertexBindingDescriptions = vertexInputBindings.data();
+
+			const std::vector<VkVertexInputAttributeDescription> vertexInputAttributes = {
+				vks::initializers::vertexInputAttributeDescription(0, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(VulkanglTFModel::Vertex, pos)),	// Location 0: Position
+				vks::initializers::vertexInputAttributeDescription(0, 1, VK_FORMAT_R32G32B32_SFLOAT, offsetof(VulkanglTFModel::Vertex, normal)),// Location 1: Normal
+				vks::initializers::vertexInputAttributeDescription(0, 2, VK_FORMAT_R32G32B32_SFLOAT, offsetof(VulkanglTFModel::Vertex, uv)),	// Location 2: Texture coordinates
+				vks::initializers::vertexInputAttributeDescription(0, 3, VK_FORMAT_R32G32B32_SFLOAT, offsetof(VulkanglTFModel::Vertex, color)),	// Location 3: Color
+			};
+			vertexInputStateCI.vertexAttributeDescriptionCount = static_cast<uint32_t>(vertexInputAttributes.size());
+			vertexInputStateCI.pVertexAttributeDescriptions = vertexInputAttributes.data();
 
 		const std::array<VkPipelineShaderStageCreateInfo, 2> shaderStages = {
 			loadShader(getHomeworkShadersPath() + "homework1/mesh.vert.spv", VK_SHADER_STAGE_VERTEX_BIT),
@@ -1040,13 +1110,14 @@ public:
 			renderPassBeginInfo.framebuffer = frameBuffers[i];
 			VK_CHECK_RESULT(vkBeginCommandBuffer(drawCmdBuffers[i], &cmdBufInfo));
 			vkCmdBeginRenderPass(drawCmdBuffers[i], &renderPassBeginInfo, VK_SUBPASS_CONTENTS_INLINE);
-			vkCmdSetViewport(drawCmdBuffers[i], 0, 1, &viewport);
-			vkCmdSetScissor(drawCmdBuffers[i], 0, 1, &scissor);
-			// Bind scene matrices descriptor to set 0
-			vkCmdBindDescriptorSets(drawCmdBuffers[i], VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 0, 1, &descriptorSet, 0, nullptr);
-			vkCmdBindPipeline(drawCmdBuffers[i], VK_PIPELINE_BIND_POINT_GRAPHICS, wireframe ? pipelines.wireframe : pipelines.solid);
-			glTFModel.draw(drawCmdBuffers[i], pipelineLayout);
-			drawUI(drawCmdBuffers[i]);
+				vkCmdSetViewport(drawCmdBuffers[i], 0, 1, &viewport);
+				vkCmdSetScissor(drawCmdBuffers[i], 0, 1, &scissor);
+				// Bind scene matrices descriptor to set 0
+				vkCmdBindDescriptorSets(drawCmdBuffers[i], VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 0, 1, &descriptorSet, 0, nullptr);
+				vkCmdBindPipeline(drawCmdBuffers[i], VK_PIPELINE_BIND_POINT_GRAPHICS, wireframe ? pipelines.wireframe : pipelines.solid);
+				
+				glTFModel.draw(drawCmdBuffers[i], pipelineLayout);
+				drawUI(drawCmdBuffers[i]);
 			vkCmdEndRenderPass(drawCmdBuffers[i]);
 			VK_CHECK_RESULT(vkEndCommandBuffer(drawCmdBuffers[i]));
 		}
@@ -1066,9 +1137,9 @@ public:
 
 #pragma region render
 	float animationTime = 0.0f;
-	void updateAnimation(int currentBuffer)
+	void animatedDraw(int currentBuffer)
 	{
-		animationTime += timerSpeed* frameTimer;
+		if (!paused) animationTime += timerSpeed * frameTimer;
 
 		VkCommandBufferBeginInfo cmdBufInfo = vks::initializers::commandBufferBeginInfo();
 
@@ -1108,20 +1179,12 @@ public:
 	{
 		VulkanExampleBase::prepareFrame();
 
-		updateAnimation(currentBuffer);
+		animatedDraw(currentBuffer);
 
 		submitInfo.commandBufferCount = 1;
 		submitInfo.pCommandBuffers = &drawCmdBuffers[currentBuffer];
 		VK_CHECK_RESULT(vkQueueSubmit(queue, 1, &submitInfo, VK_NULL_HANDLE));
 		VulkanExampleBase::submitFrame();
-	}
-
-	void updateUniformBuffers()
-	{
-		shaderData.values.projection = camera.matrices.perspective;
-		shaderData.values.model = camera.matrices.view;
-		shaderData.values.viewPos = camera.viewPos;
-		memcpy(shaderData.buffer.mapped, &shaderData.values, sizeof(shaderData.values));
 	}
 
 	virtual void render() override
